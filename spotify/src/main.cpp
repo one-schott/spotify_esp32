@@ -4,7 +4,11 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <base64.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "secrets.h"
+#include "pinout.h"
 
 // WiFi credentials
 const char* ssid = WIFI_SSID;
@@ -19,24 +23,61 @@ const char* spotify_refresh_token = SPOTIFY_REFRESH_TOKEN;
 String access_token = "";
 String current_song = "Not playing";
 String current_artist = "Unknown";
+String track_uri = "";
 unsigned long last_token_refresh = 0;
 unsigned long last_song_check = 0;
 const unsigned long token_refresh_interval = 3000000; // 50 minutes
-const unsigned long song_check_interval = 5000; // 5 seconds
+const unsigned long song_check_interval = 3000; // 3 seconds
+
+// Button debouncing
+unsigned long last_button_press = 0;
+const unsigned long button_debounce = 500;
 
 WebServer server(80);
 WiFiClientSecure client;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // Function declarations
 void connectWiFi();
 bool refreshAccessToken();
 bool getCurrentlyPlaying();
+void skipToNext();
+void skipToPrevious();
+void updateDisplay();
+void setLEDColor(int r, int g, int b);
 void handleRoot();
 void handleRefresh();
+void checkButtons();
 
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_BUILTIN, OUTPUT);
+  
+  // Setup RGB LED pins
+  pinMode(LED_RED_PIN, OUTPUT);
+  pinMode(LED_GREEN_PIN, OUTPUT);
+  pinMode(LED_BLUE_PIN, OUTPUT);
+  setLEDColor(0, 0, 0); // Off initially
+  
+  // Setup button pins (active HIGH - connected to 3.3V)
+  pinMode(BUTTON_TOP_PIN, INPUT_PULLDOWN);
+  pinMode(BUTTON_BOTTOM_PIN, INPUT_PULLDOWN);
+  
+  // Initialize I2C for OLED
+  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
+  
+  // Initialize OLED display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
+    Serial.println("SSD1306 allocation failed");
+  } else {
+    Serial.println("OLED initialized!");
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Spotify Display");
+    display.println("Connecting...");
+    display.display();
+  }
   
   Serial.println("\n\nSpotify Now Playing - ESP32");
   Serial.println("============================");
@@ -49,6 +90,7 @@ void setup() {
   if (refreshAccessToken()) {
     Serial.println("Access token obtained successfully!");
     getCurrentlyPlaying();
+    updateDisplay();
   } else {
     Serial.println("Failed to get access token");
   }
@@ -68,6 +110,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  checkButtons();
   
   unsigned long current_time = millis();
   
@@ -81,9 +124,6 @@ void loop() {
   if (current_time - last_song_check > song_check_interval) {
     getCurrentlyPlaying();
   }
-  
-  // Blink LED to show it's alive
-  digitalWrite(LED_BUILTIN, millis() % 2000 < 100);
 }
 
 void connectWiFi() {
@@ -94,7 +134,7 @@ void connectWiFi() {
   WiFi.begin(ssid, password);
   
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 60) { // Increased to 30 seconds
+  while (WiFi.status() != WL_CONNECTED && attempts < 60) {
     delay(500);
     Serial.print(".");
     attempts++;
@@ -167,11 +207,6 @@ bool refreshAccessToken() {
   String response = client.readString();
   client.stop();
   
-  // Debug output
-  Serial.println("Token Response:");
-  Serial.println(response);
-  Serial.println("---");
-  
   // Parse JSON
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, response);
@@ -186,15 +221,9 @@ bool refreshAccessToken() {
     access_token = doc["access_token"].as<String>();
     last_token_refresh = millis();
     Serial.println("Access token refreshed successfully!");
-    Serial.print("Token length: ");
-    Serial.println(access_token.length());
     return true;
   } else {
     Serial.println("No access token in response");
-    Serial.println("Available keys in response:");
-    for (JsonPair kv : doc.as<JsonObject>()) {
-      Serial.println(kv.key().c_str());
-    }
     return false;
   }
 }
@@ -203,7 +232,7 @@ bool getCurrentlyPlaying() {
   static unsigned long last_error_print = 0;
   
   if (access_token.isEmpty()) {
-    if (millis() - last_error_print > 10000) { // Only print every 10 seconds
+    if (millis() - last_error_print > 10000) {
       Serial.println("No access token available");
       last_error_print = millis();
     }
@@ -245,9 +274,15 @@ bool getCurrentlyPlaying() {
   
   // Handle 204 No Content (nothing playing)
   if (status_code == 204) {
+    String old_song = current_song;
     current_song = "Nothing playing";
     current_artist = "";
-    Serial.println("Nothing currently playing");
+    track_uri = "";
+    if (old_song != current_song) {
+      Serial.println("Nothing currently playing");
+      updateDisplay();
+      setLEDColor(0, 0, 0); // Turn off LED
+    }
     client.stop();
     last_song_check = millis();
     return true;
@@ -278,22 +313,160 @@ bool getCurrentlyPlaying() {
   if (doc["item"].is<JsonObject>()) {
     String new_song = doc["item"]["name"].as<String>();
     String new_artist = doc["item"]["artists"][0]["name"].as<String>();
+    String new_uri = doc["item"]["uri"].as<String>();
     
-    // Only update and print if song changed
+    // Only update if song changed
     if (new_song != current_song || new_artist != current_artist) {
       current_song = new_song;
       current_artist = new_artist;
+      track_uri = new_uri;
       Serial.println("\n♪ Now Playing:");
       Serial.println("   Song: " + current_song);
       Serial.println("   Artist: " + current_artist);
+      updateDisplay();
+      
+      // Cycle LED through red, green, blue based on song count (10% brightness)
+      static int song_count = 0;
+      song_count++;
+      int color_mode = song_count % 3;
+      if (color_mode == 0) {
+        setLEDColor(25, 0, 0); // Red at 10%
+      } else if (color_mode == 1) {
+        setLEDColor(0, 25, 0); // Green at 10%
+      } else {
+        setLEDColor(0, 0, 25); // Blue at 10%
+      }
     }
   } else {
     current_song = "Nothing playing";
     current_artist = "";
+    track_uri = "";
   }
   
   last_song_check = millis();
   return true;
+}
+
+void skipToNext() {
+  if (access_token.isEmpty()) {
+    Serial.println("Cannot skip: no access token");
+    return;
+  }
+  
+  Serial.println("Skipping to next track...");
+  
+  if (!client.connect("api.spotify.com", 443)) {
+    Serial.println("Connection failed");
+    return;
+  }
+  
+  client.println("POST /v1/me/player/next HTTP/1.1");
+  client.println("Host: api.spotify.com");
+  client.println("Authorization: Bearer " + access_token);
+  client.println("Content-Length: 0");
+  client.println("Connection: close");
+  client.println();
+  
+  delay(100);
+  client.stop();
+  
+  // Wait a bit then check new song
+  delay(500);
+  getCurrentlyPlaying();
+}
+
+void skipToPrevious() {
+  if (access_token.isEmpty()) {
+    Serial.println("Cannot skip: no access token");
+    return;
+  }
+  
+  Serial.println("Skipping to previous track...");
+  
+  if (!client.connect("api.spotify.com", 443)) {
+    Serial.println("Connection failed");
+    return;
+  }
+  
+  client.println("POST /v1/me/player/previous HTTP/1.1");
+  client.println("Host: api.spotify.com");
+  client.println("Authorization: Bearer " + access_token);
+  client.println("Content-Length: 0");
+  client.println("Connection: close");
+  client.println();
+  
+  delay(100);
+  client.stop();
+  
+  // Wait a bit then check new song
+  delay(500);
+  getCurrentlyPlaying();
+}
+
+void updateDisplay() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  
+  if (current_song == "Nothing playing" || current_song == "Not playing") {
+    display.setTextSize(2);
+    display.setCursor(10, 8);
+    display.println("No Song");
+  } else {
+    // Display song name (with scrolling if too long)
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.println("Now Playing:");
+    
+    display.setTextSize(1);
+    display.setCursor(0, 12);
+    if (current_song.length() > 21) {
+      display.println(current_song.substring(0, 21));
+    } else {
+      display.println(current_song);
+    }
+    
+    display.setCursor(0, 24);
+    if (current_artist.length() > 21) {
+      display.println(current_artist.substring(0, 21));
+    } else {
+      display.println(current_artist);
+    }
+  }
+  
+  display.display();
+}
+
+void setLEDColor(int r, int g, int b) {
+  // Invert values if using common anode RGB LED
+  // For common cathode, use these values directly
+  analogWrite(LED_RED_PIN, r);
+  analogWrite(LED_GREEN_PIN, g);
+  analogWrite(LED_BLUE_PIN, b);
+}
+
+void checkButtons() {
+  unsigned long current_time = millis();
+  
+  // Check if enough time has passed since last button press
+  if (current_time - last_button_press < button_debounce) {
+    return;
+  }
+  
+  // Check top button (previous track) - active HIGH
+  if (digitalRead(BUTTON_TOP_PIN) == HIGH) {
+    Serial.println(">>> TOP BUTTON PRESSED - Previous track");
+    skipToPrevious();
+    last_button_press = current_time;
+  }
+  
+  // Check bottom button (next track) - active HIGH
+  if (digitalRead(BUTTON_BOTTOM_PIN) == HIGH) {
+    Serial.println(">>> BOTTOM BUTTON PRESSED - Next track");
+    skipToNext();
+    last_button_press = current_time;
+  }
 }
 
 void handleRoot() {
@@ -321,7 +494,7 @@ void handleRoot() {
   html += "</style>";
   html += "<script>";
   html += "function refresh() { fetch('/refresh').then(() => location.reload()); }";
-  html += "setInterval(() => location.reload(), 10000);"; // Auto-refresh every 10 seconds
+  html += "setInterval(() => location.reload(), 10000);";
   html += "</script>";
   html += "</head><body>";
   html += "<div class='container'>";
