@@ -356,7 +356,7 @@ void skipToNext() {
   Serial.println("Skipping to next track...");
   
   if (!client.connect("api.spotify.com", 443)) {
-    Serial.println("Connection failed");
+    Serial.println("Connection failed for skip next");
     return;
   }
   
@@ -367,11 +367,20 @@ void skipToNext() {
   client.println("Connection: close");
   client.println();
   
-  delay(100);
+  // Wait for response
+  while (client.connected() && !client.available()) {
+    delay(10);
+  }
+  
+  // Read status code
+  String status_line = client.readStringUntil('\n');
+  Serial.print("Skip next response: ");
+  Serial.println(status_line);
+  
   client.stop();
   
   // Wait a bit then check new song
-  delay(500);
+  delay(800);
   getCurrentlyPlaying();
 }
 
@@ -384,7 +393,7 @@ void skipToPrevious() {
   Serial.println("Skipping to previous track...");
   
   if (!client.connect("api.spotify.com", 443)) {
-    Serial.println("Connection failed");
+    Serial.println("Connection failed for skip previous");
     return;
   }
   
@@ -395,11 +404,20 @@ void skipToPrevious() {
   client.println("Connection: close");
   client.println();
   
-  delay(100);
+  // Wait for response
+  while (client.connected() && !client.available()) {
+    delay(10);
+  }
+  
+  // Read status code
+  String status_line = client.readStringUntil('\n');
+  Serial.print("Skip previous response: ");
+  Serial.println(status_line);
+  
   client.stop();
   
   // Wait a bit then check new song
-  delay(500);
+  delay(800);
   getCurrentlyPlaying();
 }
 
@@ -454,17 +472,17 @@ void checkButtons() {
     return;
   }
   
-  // Check top button (previous track) - active HIGH
+  // Check top button (next track) - active HIGH
   if (digitalRead(BUTTON_TOP_PIN) == HIGH) {
-    Serial.println(">>> TOP BUTTON PRESSED - Previous track");
-    skipToPrevious();
+    Serial.println(">>> TOP BUTTON PRESSED - Next track");
+    skipToNext();
     last_button_press = current_time;
   }
   
-  // Check bottom button (next track) - active HIGH
+  // Check bottom button (previous track) - active HIGH
   if (digitalRead(BUTTON_BOTTOM_PIN) == HIGH) {
-    Serial.println(">>> BOTTOM BUTTON PRESSED - Next track");
-    skipToNext();
+    Serial.println(">>> BOTTOM BUTTON PRESSED - Previous track");
+    skipToPrevious();
     last_button_press = current_time;
   }
 }
