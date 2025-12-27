@@ -618,12 +618,12 @@ void updateDisplay() {
   
   if (current_song == "Nothing playing" || current_song == "Not playing") {
     display.setTextSize(2);
-    display.setCursor(10, 8);
+    display.setCursor(10, 4);
     display.println("No Song");
     
     // Show session stats
     display.setTextSize(1);
-    display.setCursor(0, 26);
+    display.setCursor(0, 22);
     display.print("Played: ");
     display.print(songs_played_this_session);
   } else {
