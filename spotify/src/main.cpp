@@ -24,10 +24,18 @@ String access_token = "";
 String current_song = "Not playing";
 String current_artist = "Unknown";
 String track_uri = "";
+int track_duration_ms = 0;
+int track_progress_ms = 0;
+unsigned long progress_last_updated = 0; // When we last got real progress from API
 unsigned long last_token_refresh = 0;
 unsigned long last_song_check = 0;
 const unsigned long token_refresh_interval = 3000000; // 50 minutes
 const unsigned long song_check_interval = 3000; // 3 seconds
+
+// Scrolling text variables
+int scroll_position = 0;
+unsigned long last_scroll_update = 0;
+const unsigned long scroll_interval = 300; // Scroll speed in ms
 
 // Button debouncing
 unsigned long last_button_press = 0;
@@ -123,6 +131,12 @@ void loop() {
   // Check currently playing song
   if (current_time - last_song_check > song_check_interval) {
     getCurrentlyPlaying();
+  }
+  
+  // Update scrolling display
+  if (current_time - last_scroll_update > scroll_interval) {
+    updateDisplay();
+    last_scroll_update = current_time;
   }
 }
 
@@ -314,12 +328,18 @@ bool getCurrentlyPlaying() {
     String new_song = doc["item"]["name"].as<String>();
     String new_artist = doc["item"]["artists"][0]["name"].as<String>();
     String new_uri = doc["item"]["uri"].as<String>();
+    int new_duration = doc["item"]["duration_ms"].as<int>();
+    int new_progress = doc["progress_ms"].as<int>();
     
     // Only update if song changed
     if (new_song != current_song || new_artist != current_artist) {
       current_song = new_song;
       current_artist = new_artist;
       track_uri = new_uri;
+      track_duration_ms = new_duration;
+      track_progress_ms = new_progress;
+      progress_last_updated = millis();
+      scroll_position = 0; // Reset scroll when song changes
       Serial.println("\n♪ Now Playing:");
       Serial.println("   Song: " + current_song);
       Serial.println("   Artist: " + current_artist);
@@ -336,11 +356,21 @@ bool getCurrentlyPlaying() {
       } else {
         setLEDColor(0, 0, 25); // Blue at 10%
       }
+    } else {
+      // Update progress from API
+      track_progress_ms = new_progress;
+      progress_last_updated = millis();
     }
   } else {
+    String old_song = current_song;
     current_song = "Nothing playing";
     current_artist = "";
     track_uri = "";
+    track_duration_ms = 0;
+    track_progress_ms = 0;
+    if (old_song != current_song) {
+      updateDisplay();
+    }
   }
   
   last_song_check = millis();
@@ -425,31 +455,78 @@ void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
   
   if (current_song == "Nothing playing" || current_song == "Not playing") {
     display.setTextSize(2);
     display.setCursor(10, 8);
     display.println("No Song");
   } else {
-    // Display song name (with scrolling if too long)
+    // Line 1: Song name (scrolling if needed)
     display.setCursor(0, 0);
     display.setTextSize(1);
-    display.println("Now Playing:");
+    int max_chars = 21; // ~21 chars fit on 128px width at size 1
     
-    display.setTextSize(1);
-    display.setCursor(0, 12);
-    if (current_song.length() > 21) {
-      display.println(current_song.substring(0, 21));
+    if (current_song.length() > max_chars) {
+      // Scrolling text
+      String padded_song = current_song + "   "; // Add spaces for smoother loop
+      int total_len = padded_song.length();
+      String display_text = "";
+      
+      for (int i = 0; i < max_chars; i++) {
+        display_text += padded_song[(scroll_position + i) % total_len];
+      }
+      display.println(display_text);
+      scroll_position++;
+      if (scroll_position >= total_len) {
+        scroll_position = 0;
+      }
     } else {
       display.println(current_song);
     }
     
-    display.setCursor(0, 24);
-    if (current_artist.length() > 21) {
-      display.println(current_artist.substring(0, 21));
+    // Line 2: Artist name (scrolling if needed)
+    display.setCursor(0, 10);
+    if (current_artist.length() > max_chars) {
+      // Scrolling text
+      String padded_artist = current_artist + "   ";
+      int total_len = padded_artist.length();
+      String display_text = "";
+      
+      for (int i = 0; i < max_chars; i++) {
+        display_text += padded_artist[(scroll_position + i) % total_len];
+      }
+      display.println(display_text);
     } else {
       display.println(current_artist);
+    }
+    
+    // Progress bar at bottom
+    if (track_duration_ms > 0) {
+      // Calculate estimated current progress based on time elapsed
+      unsigned long time_elapsed = millis() - progress_last_updated;
+      int estimated_progress = track_progress_ms + time_elapsed;
+      
+      // Cap at duration if we've reached the end
+      if (estimated_progress > track_duration_ms) {
+        estimated_progress = track_duration_ms;
+      }
+      
+      // Draw progress bar (full width of screen = 128 pixels)
+      int bar_width = 126; // Leave 1 pixel margin on each side
+      int bar_height = 6;
+      int bar_x = 1;
+      int bar_y = 24;
+      
+      // Calculate filled width based on progress
+      int filled_width = (estimated_progress * bar_width) / track_duration_ms;
+      
+      // Draw outer rectangle (border)
+      display.drawRect(bar_x, bar_y, bar_width, bar_height, SSD1306_WHITE);
+      
+      // Draw filled portion
+      if (filled_width > 0) {
+        display.fillRect(bar_x + 1, bar_y + 1, filled_width - 2, bar_height - 2, SSD1306_WHITE);
+      }
     }
   }
   
